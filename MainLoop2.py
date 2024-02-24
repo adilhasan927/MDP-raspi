@@ -1,8 +1,10 @@
+import copy
 import select
 import time
 from pathlib import Path
 import requests
 import jsonpickle
+from TSP.tsp import TSP
 
 bluetooth_poll = select.poll()
 bluetooth_poll_registered = False
@@ -56,8 +58,11 @@ def handle_blueooth_writes():
         with open(bluetooth_path, 'wb') as f:
             while len(bluetooth_write_queue) > 0:
                 try:
-                    to_write = bluetooth_write_queue.pop(0)
-                    f.write(to_write.encode(encoding='ascii'))
+                    to_write = bluetooth_write_queue[0]
+                    to_write = to_write.encode(encoding='ascii')
+                    f.write(to_write)
+                    print("Wrote to Bluetooth: {}".format(to_write))
+                    bluetooth_write_queue.pop(0)
                 except:
                     return False
     return True
@@ -120,21 +125,168 @@ def perform_stm_write(to_write):
             f.write(to_write)
     print("Sent command to STM: {}".format(to_write))
 
+def facing_after_turn(facing, turn):
+    face_maping_dict = {
+        ('N', 'R'): 'E',
+        ('W', 'R'): 'S',
+        ('S', 'R'): 'W',
+        ('E', 'R'): 'N',
+        ('N', 'L'): 'W',
+        ('W', 'L'): 'N',
+        ('S', 'L'): 'E',
+        ('E', 'L'): 'S'
+    }
+    return face_maping_dict[(facing, turn)]
+
+obstacle_positions = dict()
+car_location = dict(x=1, y=1, facing='N')
+algo_in_control = False
+algo_mode = None
+algo_solution = None
+algo_commands = None
 def main_loop():
+    global obstacle_positions
+    global car_location
+    global algo_in_control
+    global algo_mode
+    global algo_solution
+    global algo_commands
+    car_new_location = copy.copy(car_location)
+
     while True:
         received_line = handle_blueooth_read()
 
         to_stm = None
-        if received_line == 'f\n':
+        if received_line is None:
+            pass
+        elif received_line == 'run\n':
+            algo_in_control = True
+            algo_mode = 'run'
+        elif received_line == 'pathfinding\n':
+            algo_in_control = True
+            algo_mode = 'pathfinding'
+        elif received_line == 'stop\n':
+            algo_in_control = False
+        elif received_line.startswith('Obstacle'):
+            received_line_parsed = received_line.split(': ')
+            received_line_parsed = [i.split(',')[0] for i in received_line_parsed]
+            received_line_parsed = received_line_parsed[1:]
+
+            id = received_line_parsed[0]
+            if len(received_line_parsed) == 3:
+                col = int(received_line_parsed[1])
+                row = int(received_line_parsed[2])
+            else:
+                facing = received_line_parsed[1]
+            
+            if id not in obstacle_positions:
+                obstacle_positions[id] = dict()
+            obstacle_positions[id]['col'] = col
+            obstacle_positions[id]['row'] = row
+            obstacle_positions[id]['facing'] = facing
+        elif algo_in_control:
+            pass
+        elif received_line == 'f\n':
             to_stm = 'w8000\n'
+            car_new_location['y'] = car_location['y'] + 1
+        elif received_line == 'r\n':
+            to_stm = 's8000\n'
+            car_new_location['y'] = car_location['y'] - 1
+        elif received_line == 'sr\n':
+            to_stm = 'd9080\n'
+            car_new_location['x'] = car_location['x'] + 1
+            car_new_location['y'] = car_location['y'] + 2
+            car_new_location['facing'] = facing_after_turn(car_location['facing'], 'R')
+        elif received_line == 'sl\n':
+            to_stm = 'a9080\n'
+            car_new_location['x'] = car_location['x'] - 1
+            car_new_location['y'] = car_location['y'] + 2
+            car_new_location['facing'] = facing_after_turn(car_location['facing'], 'L')
+
+        facing_to_fullname = {
+            'N': 'North',
+            'S': 'South',
+            'E': 'East',
+            'W': 'West'
+        }
+
+        if algo_in_control and algo_solution is None:
+            algo_solution = TSP(
+                initPosition=(
+                    car_location['x'],
+                    car_location['y'],
+                    facing_to_fullname[car_location['facing']]
+                ),
+                dimX=3, dimY=3, turnRad=2.5
+            )
+            for key, value in obstacle_positions.items():
+                x, y, facing = value['x'], value['y'], value['facing']
+                algo_solution.addObstacle((x, y, facing))
+            algo_success = algo_solution.calcDubins(0.5)
+
+            if not algo_success:
+                algo_in_control = False
+                print("Path calculation failed")
+            else:
+                print("Path calculation succeeded")
+                algo_commands = algo_solution.generateCommands()
+                for segment in algo_commands:
+                    segment.append('SEG_END')
+                algo_commands = [j for i in algo_commands for j in i]
+
+        if algo_in_control:
+            if len(algo_commands) > 0:
+                algo_command = algo_commands.pop(0)
+                print("Current algo command: {}".format(algo_command))
+            else:
+                print("Algorithm done executing")
+                algo_in_control = False
+
+            end_of_segment_reached = False
+            if algo_commands[0] == 'SEG_END':
+                algo_commands.pop(0)
+                end_of_segment_reached = True
+
+            end_coord = algo_command[-1]
+            car_new_location['x'] = end_coord[0]
+            car_new_location['y'] = end_coord[1]
+            if algo_command[0] == 'R':
+                to_stm = 'd{}{}\n'.format(algo_command[1], algo_command[2])
+            elif algo_command[0] == 'L':
+                to_stm = 'a{}{}\n'.format(algo_command[1], algo_command[2])
+            elif algo_command[0] == 'S' and algo_command[1] > 0:
+                to_stm = 'w{}\n'.format(algo_command[1])
+            elif algo_command[0] == 'S' and algo_command[1] < 0:
+                to_stm = 's{}\n'.format(algo_command[1])
 
         if to_stm is not None:
             perform_stm_write(to_stm)
+            #TODO: Wait for STM ACK
+            time.sleep(1.0)
 
+        if algo_in_control and end_of_segment_reached:
+            print("End of segment reached, performing classification")
+            class_detected = perform_classification()
+            print("Class detected: {}".format(class_detected))
+            algo_in_control = False
+
+        if received_line is not None or to_stm is not None:
+            bluetooth_write_queue.append('ROBOT, {}, {}, {}\n'.format(
+                car_new_location['x'],
+                car_new_location['y'],
+                car_new_location['facing']
+            ))
+            car_location = car_new_location
+            
+            if algo_in_control:
+                bluetooth_write_queue.append('STATUS, FOLLOWING ALGO\n')
+            else:
+                bluetooth_write_queue.append('STATUS, READY\n')
+        
         handle_blueooth_writes()
         
         print("---")
         
-        time.sleep(1.0)
+        time.sleep(0.1)
 
 main_loop()
