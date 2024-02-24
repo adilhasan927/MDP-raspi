@@ -121,7 +121,8 @@ while True:
 
     #send_stm_this_loop = False
     send_stm_this_loop = True
-    stm_command = 'w'
+    stm_command = 'w8000'
+    #stm_command = 'a8090'
     if send_stm_this_loop and stm_poll_registered:
         with open(stm_path, 'wb') as f:
             f.write(b'w\n')

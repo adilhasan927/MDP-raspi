@@ -1,0 +1,5 @@
+*.pt
+*.pyc
+*.jpg
+__pycache__/
+TSP/*.ipynb
