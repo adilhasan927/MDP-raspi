@@ -33,15 +33,16 @@ def handle_blueooth_read():
     except:
         pass
 
-    received_line = None
+    bt_received_line = None
     if len(poll_out) > 0 and (poll_out[0][1] & select.POLLIN):
         try:
-            received_line = bluetooth_file.readline()
-            print(received_line)
-            if received_line != '':
-                print("Bluetooth received: {}".format(received_line))
+            bt_received_line = bluetooth_file.readline()
+            print(bt_received_line)
+            if bt_received_line != '':
+                print("Bluetooth received: {}".format(bt_received_line))
             else:
                 print("Nothing received")
+                stm_received_line = None
         except:
             bluetooth_poll_registered = False
             bluetooth_poll.unregister(bluetooth_file)
@@ -49,7 +50,7 @@ def handle_blueooth_read():
             bluetooth_file = None
             print("{} no longer present".format(bluetooth_path))
     
-    return received_line
+    return bt_received_line
 
 bluetooth_write_queue = []
 def handle_blueooth_writes():
@@ -111,10 +112,52 @@ def perform_classification():
     print("First class detected: {}", detected_class)
     return detected_class
 
-#stm_poll = select.poll()
-#stm_poll_registered = False
+stm_poll = select.poll()
+stm_poll_registered = False
 stm_path = Path('/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0002-if00-port0')
-#stm_file = None
+stm_file = None
+
+def handle_stm_read():
+    global stm_poll
+    global stm_poll_registered
+    global stm_file
+
+    if not stm_poll_registered:
+        print("Attempting to set up STM file")
+        if stm_path.exists():
+            stm_file = open(stm_path, 'r')#open('/dev/rfcomm0')
+            stm_poll.register(stm_file)
+            stm_poll_registered = True
+            print("{} poll set up".format(stm_path))
+        else:
+            print("{} not present".format(stm_path))
+    
+    poll_out = stm_poll.poll(0.01)
+    #print("stm poll: {}".format(poll_out))
+    try:
+        print("{} changed? {}".format(stm_path, poll_out[0][1] & select.POLLIN))
+    except:
+        pass
+
+    stm_received_line = None
+    if len(poll_out) > 0 and (poll_out[0][1] & select.POLLIN):
+        try:
+            stm_received_line = stm_file.readline()
+            print(stm_received_line)
+            if stm_received_line != '':
+                print("stm received: {}".format(bt_received_line))
+            else:
+                print("Nothing received")
+                stm_received_line = None
+        except:
+            stm_poll_registered = False
+            stm_poll.unregister(stm_file)
+            stm_poll = select.poll()
+            stm_file = None
+            print("{} no longer present".format(stm_path))
+    
+    return stm_received_line
+
 def perform_stm_write(to_write):
     to_write = to_write.encode(encoding='ascii')
     if stm_path.exists():
@@ -154,30 +197,31 @@ def main_loop():
     car_new_location = copy.copy(car_location)
 
     while True:
-        received_line = handle_blueooth_read()
+        bt_received_line = handle_blueooth_read()
+        stm_received_line = handle_stm_read()
 
         to_stm = None
-        if received_line is None:
+        if bt_received_line is None:
             pass
-        elif received_line == 'run\n':
+        elif bt_received_line == 'run\n':
             algo_in_control = True
             algo_mode = 'run'
-        elif received_line == 'pathfinding\n':
+        elif bt_received_line == 'pathfinding\n':
             algo_in_control = True
             algo_mode = 'pathfinding'
-        elif received_line == 'stop\n':
+        elif bt_received_line == 'stop\n':
             algo_in_control = False
-        elif received_line.startswith('Obstacle'):
-            received_line_parsed = received_line.split(': ')
-            received_line_parsed = [i.split(',')[0] for i in received_line_parsed]
-            received_line_parsed = received_line_parsed[1:]
+        elif bt_received_line.startswith('Obstacle'):
+            bt_received_line_parsed = bt_received_line.split(': ')
+            bt_received_line_parsed = [i.split(',')[0] for i in bt_received_line_parsed]
+            bt_received_line_parsed = bt_received_line_parsed[1:]
 
-            id = received_line_parsed[0]
-            if len(received_line_parsed) == 3:
-                col = int(received_line_parsed[1])
-                row = int(received_line_parsed[2])
+            id = bt_received_line_parsed[0]
+            if len(bt_received_line_parsed) == 3:
+                col = int(bt_received_line_parsed[1])
+                row = int(bt_received_line_parsed[2])
             else:
-                facing = received_line_parsed[1]
+                facing = bt_received_line_parsed[1]
             
             if id not in obstacle_positions:
                 obstacle_positions[id] = dict()
@@ -186,18 +230,18 @@ def main_loop():
             obstacle_positions[id]['facing'] = facing
         elif algo_in_control:
             pass
-        elif received_line == 'f\n':
+        elif bt_received_line == 'f\n':
             to_stm = 'w8000\n'
             car_new_location['y'] = car_location['y'] + 1
-        elif received_line == 'r\n':
+        elif bt_received_line == 'r\n':
             to_stm = 's8000\n'
             car_new_location['y'] = car_location['y'] - 1
-        elif received_line == 'sr\n':
+        elif bt_received_line == 'sr\n':
             to_stm = 'd9080\n'
             car_new_location['x'] = car_location['x'] + 1
             car_new_location['y'] = car_location['y'] + 2
             car_new_location['facing'] = facing_after_turn(car_location['facing'], 'R')
-        elif received_line == 'sl\n':
+        elif bt_received_line == 'sl\n':
             to_stm = 'a9080\n'
             car_new_location['x'] = car_location['x'] - 1
             car_new_location['y'] = car_location['y'] + 2
@@ -270,7 +314,12 @@ def main_loop():
             print("Class detected: {}".format(class_detected))
             algo_in_control = False
 
-        if received_line is not None or to_stm is not None:
+        if stm_received_line:
+            print("STM !, performing classification")
+            class_detected = perform_classification()
+            print("Class detected: {}".format(class_detected))
+
+        if bt_received_line is not None or to_stm is not None:
             bluetooth_write_queue.append('ROBOT, {}, {}, {}\n'.format(
                 car_new_location['x'],
                 car_new_location['y'],
